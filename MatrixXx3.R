@@ -1,38 +1,56 @@
-# 1. CARGA DE LIBRERÍAS (Sin duplicados)
+# 1. CARGA DE LIBRERÍAS
 library(tidyverse) 
 library(readxl)
 library(writexl)
 library(janitor)
 library(tidyxl)
 library(skimr)
-
-# 2. CONFIGURACIÓN DE ENTORNO
-setwd(r"(/home/vitodaz/Documentos/INGENIERIA/2026-02-08/DB/Avance II/MatrixXx3)")
+library(httr) 
 
 
-# 3. LECTURA DE DATOS PRINCIPALES
-# Solo trabajaremos con estos dos archivos
-matrixtec <- read_excel("Matriz técnica general Andes Norte (CC-130).xlsx", skip = 20)
-Avancedf  <- read_excel("Avance CC-130.xlsx", skip = 20)
+# 2. CONFIGURACIÓN DE RUTAS DINÁMICAS (Windows/Linux)
+# Detecta si estás en el ThinkPad (Linux) o en Windows
+if (Sys.info()["sysname"] == "Linux") {
+  base_path <- "/home/vitodaz/Documentos/INGENIERIA/2026-02-08/DB/Avance II/MatrixXx3"
+} else {
+  # Ajusta esta ruta a tu carpeta de Windows
+  base_path <- "C:/Users/vitodaz/Documents/MatrixXx3" 
+}
 
-# 4. EXTRACCIÓN DE METADATOS DE COLOR (Optimizado)
-archivo_avance <- "Avance CC-130.xlsx"
-df_completo    <- xlsx_cells(archivo_avance)
-formatos       <- xlsx_formats(archivo_avance)
+if (!dir.exists(base_path)) dir.create(base_path, recursive = TRUE)
+setwd(base_path)
 
-# Identificar celdas coloreadas desde columna U (21) en adelante
+# 3. DESCARGA DE ARCHIVOS DESDE DROPBOX
+# Cambiamos dl=0 por dl=1 para forzar la descarga directa
+url_avance <- "https://www.dropbox.com/scl/fi/z3j8t9y1lkv01ipfsvv55/Avance-CC-130.xlsx?rlkey=lif1tl03m4yi1kxh5zzxd6i15&st=7obi660x&dl=1"
+url_matrix <- "https://www.dropbox.com/scl/fi/8jgu635nt0obntp7ee3rs/Matriz-t-cnica-general-Andes-Norte-CC-130.xlsx?rlkey=ce4r0xp5blkzvkqi7qk07aaqk&st=6kk1i3r3&dl=1"
+
+# Descargamos los archivos temporalmente para que read_excel y tidyxl funcionen
+archivo_avance <- "Avance_CC_130.xlsx"
+archivo_matrix <- "Matriz_tecnica_Andes_Norte.xlsx"
+
+GET(url_avance, write_disk(archivo_avance, overwrite = TRUE))
+GET(url_matrix, write_disk(archivo_matrix, overwrite = TRUE))
+
+# 4. LECTURA DE DATOS
+matrixtec <- read_excel(archivo_matrix, skip = 20)
+Avancedf  <- read_excel(archivo_avance, skip = 20)
+
+# 5. EXTRACCIÓN DE METADATOS DE COLOR
+df_completo <- xlsx_cells(archivo_avance)
+formatos    <- xlsx_formats(archivo_avance)
+
 celdas_coloreadas <- df_completo %>%
   filter(
     col >= 21,    # Columna U en adelante
-    row >= 22     # Fila 22 en adelante (asumiendo que la 21 es el encabezado)
+    row >= 22     # Fila 22 en adelante
   ) %>% 
   mutate(
     color_relleno = formatos$local$fill$patternFill$fgColor$rgb[local_format_id]
   ) %>%
   filter(!is.na(color_relleno))
 
-#  ESTANDARIZACIÓN Y LIMPIEZA (Diccionario Optimizado)
-# Diccionario para renombrar columnas a nombres cortos
+# 6. ESTANDARIZACIÓN Y LIMPIEZA
 diccionario_final <- c(
   "bulto_interno"     = "n_bulto_interno",
   "contrato"          = "contrato",
@@ -66,68 +84,42 @@ diccionario_final <- c(
 matrixtec_clean <- matrixtec %>% 
   clean_names() %>% 
   rename(any_of(diccionario_final)) %>%
-  # NUEVO: Forzar cantidad a número y limpiar espacios
   mutate(cantidad = as.numeric(cantidad))
 
 Avancedf_clean <- Avancedf %>% 
   clean_names() %>% 
   rename(any_of(diccionario_final)) %>%
-  # NUEVO: Forzar cantidad a número y limpiar espacios
   mutate(cantidad = as.numeric(cantidad))
 
-# Paso A: Crear un "Diccionario Maestro de Lugares" desde la Matriz Técnica
-# Agrupamos por bulto y tomamos el primer lugar válido que encontremos.
+# 7. CRUCE DE LUGARES (Diccionario Maestro)
 referencia_lugar <- matrixtec_clean %>%
-  group_by(bulto_interno) %>%  # <--- CORREGIDO: Usamos el nombre ya limpio
+  group_by(bulto_interno) %>% 
   summarise(
-    lugar_ref = first(na.omit(lugar)), # Toma el primer lugar no nulo encontrado
+    lugar_ref = first(na.omit(lugar)),
     .groups = "drop"
   ) %>%
-  filter(!is.na(bulto_interno)) # Eliminamos filas vacías si las hubiera
+  filter(!is.na(bulto_interno))
 
-# Cruzamos usando la columna común 'bulto_interno'
 Avancedf_final <- Avancedf_clean %>%
   left_join(referencia_lugar, by = "bulto_interno") %>%
-  mutate(
-    # Si Avance ya tiene lugar, lo mantiene. Si no, usa el de la referencia.
-    lugar = coalesce(lugar, lugar_ref) 
-  ) %>%
-  select(-lugar_ref) # Eliminamos la columna auxiliar
+  mutate(lugar = coalesce(lugar, lugar_ref)) %>%
+  select(-lugar_ref)
 
-# Verificación rápida
-print(paste("Filas cruzadas:", nrow(Avancedf_final)))
-print(glimpse(Avancedf_final))
-##########################################################################################################
-# 7. HOMOGENEIZACIÓN DE ESTRUCTURAS
-# Identificar qué columnas tiene el objetivo (Avance)
+# 8. HOMOGENEIZACIÓN DE ESTRUCTURAS
 columnas_objetivo <- colnames(Avancedf_final)
 
-# Creamos una versión de Matrix que solo tiene las columnas que nos interesan
 matrixtec_final <- matrixtec_clean %>%
   select(any_of(columnas_objetivo))
 
-#  Obtenemos una fila vacía con los tipos de datos CORRECTOS (de Avance)
-template_tipos <- Avancedf_final %>% filter(FALSE)
-
-#  Forzamos a que las columnas de matrixtec_final tengan el mismo tipo que el template
-# Esto convierte, por ejemplo, character a double o viceversa según sea necesario
-for (col_name in intersect(names(matrixtec_final), names(template_tipos))) {
-  class(matrixtec_final[[col_name]]) <- class(template_tipos[[col_name]])
+# Sincronización de tipos de datos
+for (col_name in intersect(names(matrixtec_final), names(Avancedf_final))) {
+  target_class <- class(Avancedf_final[[col_name]])
+  matrixtec_final[[col_name]] <- as(matrixtec_final[[col_name]], target_class)
 }
-
-#  Ahora sí, unimos las columnas faltantes (que vendrán de Avancedf_final)
-matrixtec_final <- matrixtec_final %>%
-  bind_rows(template_tipos) %>%
-  # Reordenamos las columnas para que el espejo sea perfecto
-  select(all_of(columnas_objetivo))
-
-
-glimpse(matrixtec_final)
-glimpse(Avancedf_final)
-
-skim(Avancedf_final)
-skim(matrixtec_final)
-
-
+View(Avancedf_final)
+View(matrixtec_final)
+# 9. EXPORTACIÓN FINAL
 write_xlsx(Avancedf_final, "Avancedf_final.xlsx")
 write_xlsx(matrixtec_final, "matrixtec_final.xlsx")
+
+print("Proceso completado con éxito.")
